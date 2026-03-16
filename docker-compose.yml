@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_DB: guezzing
+      POSTGRES_USER: guezzing
+      POSTGRES_PASSWORD: guezzing
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guezzing -d guezzing"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/redis:7-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      PORT: 3001
+      JWT_SECRET: ${JWT_SECRET}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: guezzing
+      DB_PASSWORD: guezzing
+      DB_NAME: guezzing
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE: /api
+      NEXT_PUBLIC_WS_BASE: /
+    depends_on:
+      - backend
+
+  nginx:
+    image: m.daocloud.io/docker.io/library/nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  postgres_data:
