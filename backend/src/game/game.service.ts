@@ -14,6 +14,7 @@ import {
   GuessEntity,
   SecretEntity,
 } from '../database/entities';
+import { LeaderboardService } from '../leaderboard/leaderboard.service';
 import { LobbyService } from '../lobby/lobby.service';
 import { RedisService } from '../redis/redis.service';
 import { UsersService } from '../users/users.service';
@@ -53,6 +54,7 @@ export class GameService {
     private readonly redisService: RedisService,
     private readonly usersService: UsersService,
     private readonly lobbyService: LobbyService,
+    private readonly leaderboardService: LeaderboardService,
   ) {}
 
   async createGame(
@@ -362,6 +364,10 @@ export class GameService {
     await this.persistLiveGame(game);
     await this.cleanupActiveGameState(game);
     await Promise.all(game.players.map((player) => this.lobbyService.setUserStatus(player.id, 'ONLINE')));
+    this.leaderboardService.markChanged(
+      'game_finished',
+      playerEntities.filter((player): player is NonNullable<typeof player> => Boolean(player)).map((player) => player.id),
+    );
   }
 
   private async resolveTimeoutForGame(gameId: number): Promise<TimeoutResolution | null> {
@@ -509,6 +515,7 @@ export class GameService {
   }
 
   private toGameSnapshot(game: LiveGame, userId: number): GameSnapshot {
+    const opponent = game.players.find((player) => player.id !== userId);
     return {
       gameId: game.id,
       N: game.N,
@@ -518,6 +525,10 @@ export class GameService {
       started: game.state === GameState.PLAYING || game.state === GameState.FINISHED || game.state === GameState.INVALID,
       startedAt: game.startedAt,
       endedAt: game.endedAt,
+      opponentAnswer:
+        (game.state === GameState.FINISHED || game.state === GameState.INVALID) && opponent
+          ? game.secrets[opponent.id]
+          : undefined,
       myGuesses: game.guesses
         .filter((guess) => guess.playerId === userId)
         .map((guess) => ({

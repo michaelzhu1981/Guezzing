@@ -6,7 +6,7 @@ import { App, Button, Card, Col, Form, Input, InputNumber, Layout, List, Modal, 
 import { useEffect, useRef, useState } from 'react';
 import { apiRequest } from '@/services/api';
 import { disconnectSocket, getSocket } from '@/services/socket';
-import { useAppStore } from '@/store/app-store';
+import { AuthUser, useAppStore } from '@/store/app-store';
 
 const { Header, Content } = Layout;
 const { Title, Text } = Typography;
@@ -78,6 +78,11 @@ type LobbyInvite = {
   fromUsername: string;
   N: number;
   M: number;
+};
+
+type LeaderboardPayload = {
+  leaderboard: AuthUser[];
+  updatedAt: string;
 };
 
 type SegmentedCharInputProps = {
@@ -382,6 +387,8 @@ export function AppShell({ currentPage }: AppShellProps) {
     setAuth,
     logout,
     setLobbySnapshot,
+    setLeaderboard,
+    setUserProfile,
     addMessage,
     addGameMessage,
     setGame,
@@ -428,13 +435,16 @@ export function AppShell({ currentPage }: AppShellProps) {
     const handleLobbySnapshot = (payload: {
       onlineUsers?: typeof onlineUsers;
       leaderboard?: typeof leaderboard;
+      leaderboardUpdatedAt?: string;
       messages?: typeof messages;
     }) => {
       setLobbySnapshot({
         onlineUsers: payload.onlineUsers || [],
-        leaderboard: payload.leaderboard || [],
         messages: payload.messages || [],
       });
+      if (payload.leaderboard && payload.leaderboardUpdatedAt) {
+        setLeaderboard(payload.leaderboard, payload.leaderboardUpdatedAt);
+      }
     };
     const handleChatMessage = (payload: (typeof messages)[number]) => addMessage(payload);
     const handleUserOnline = (payload: (typeof onlineUsers)[number]) =>
@@ -474,6 +484,7 @@ export function AppShell({ currentPage }: AppShellProps) {
         started: false,
         startedAt: undefined,
         endedAt: undefined,
+        opponentAnswer: undefined,
         myGuesses: [],
         opponentGuesses: [],
         chatMessages: [],
@@ -501,6 +512,7 @@ export function AppShell({ currentPage }: AppShellProps) {
         endedAt: payload.endedAt,
         winnerId: payload.winnerId,
         invalidReason: payload.invalidReason,
+        opponentAnswer: payload.opponentAnswer,
         myGuesses: payload.myGuesses || [],
         opponentGuesses: payload.opponentGuesses || [],
         chatMessages: payload.chatMessages || [],
@@ -540,12 +552,12 @@ export function AppShell({ currentPage }: AppShellProps) {
         hitCharCount: payload.hitCharCount,
         hitPosCount: payload.hitPosCount,
       });
-    const handleGameWin = (payload: { winnerId: number; endedAt?: string }) => {
-      setWinner(payload.winnerId, payload.endedAt);
+    const handleGameWin = (payload: { winnerId: number; endedAt?: string; opponentAnswer?: string }) => {
+      setWinner(payload.winnerId, payload.endedAt, payload.opponentAnswer);
       app.message.info(`对局结束，胜者是玩家 #${payload.winnerId}`);
     };
-    const handleGameInvalid = (payload: { reason: 'disconnect' | 'inactivity'; endedAt?: string }) => {
-      setInvalid(payload.reason, payload.endedAt);
+    const handleGameInvalid = (payload: { reason: 'disconnect' | 'inactivity'; endedAt?: string; opponentAnswer?: string }) => {
+      setInvalid(payload.reason, payload.endedAt, payload.opponentAnswer);
       app.message.warning(
         payload.reason === 'disconnect' ? '对局因双方掉线超时被判为无效局' : '对局因 5 分钟无操作被判为无效局',
       );
@@ -631,6 +643,12 @@ export function AppShell({ currentPage }: AppShellProps) {
         app.message.info(`玩家 #${payload.userId} 取消了邀请`);
       }
     };
+    const handleLeaderboardUpdated = (payload: LeaderboardPayload) => {
+      setLeaderboard(payload.leaderboard, payload.updatedAt);
+    };
+    const handleProfileUpdated = (payload: { user: AuthUser; updatedAt: string }) => {
+      setUserProfile(payload.user);
+    };
     const handleException = (payload: unknown) => {
       app.message.error(getSocketErrorMessage(payload));
     };
@@ -663,6 +681,8 @@ export function AppShell({ currentPage }: AppShellProps) {
     socket.on('invite_rejected', handleInviteRejected);
     socket.on('invite_expired', handleInviteExpired);
     socket.on('invite_cancelled', handleInviteCancelled);
+    socket.on('leaderboard_updated', handleLeaderboardUpdated);
+    socket.on('profile_updated', handleProfileUpdated);
     socket.on('exception', handleException);
     socket.on('connect_error', handleConnectError);
     const emitHeartbeat = () => {
@@ -698,6 +718,8 @@ export function AppShell({ currentPage }: AppShellProps) {
       socket.off('invite_rejected', handleInviteRejected);
       socket.off('invite_expired', handleInviteExpired);
       socket.off('invite_cancelled', handleInviteCancelled);
+      socket.off('leaderboard_updated', handleLeaderboardUpdated);
+      socket.off('profile_updated', handleProfileUpdated);
       socket.off('exception', handleException);
       socket.off('connect_error', handleConnectError);
       socket.off('connect', emitHeartbeat);
@@ -712,9 +734,48 @@ export function AppShell({ currentPage }: AppShellProps) {
     router,
     setGame,
     setInvalid,
+    setLeaderboard,
     setLobbySnapshot,
+    setUserProfile,
     setWinner,
   ]);
+
+  useEffect(() => {
+    if (!token || currentPage !== 'lobby') {
+      return;
+    }
+
+    let disposed = false;
+
+    const syncLeaderboard = async () => {
+      try {
+        const payload = await apiRequest<LeaderboardPayload>('/leaderboard', undefined, token);
+        if (!disposed) {
+          setLeaderboard(payload.leaderboard, payload.updatedAt);
+        }
+      } catch {}
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void syncLeaderboard();
+      }
+    };
+
+    void syncLeaderboard();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void syncLeaderboard();
+      }
+    }, 15_000);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [currentPage, setLeaderboard, token]);
 
   useEffect(() => {
     if (!game?.startedAt || game.endedAt) {
@@ -1279,6 +1340,18 @@ export function AppShell({ currentPage }: AppShellProps) {
                       {game.winnerId && <Tag color={game.winnerId === user.userId ? 'green' : 'red'}>{game.winnerId === user.userId ? '你赢了' : '你输了'}</Tag>}
                       {game.invalidReason && <Tag color="orange">无效局</Tag>}
                     </Space>
+                    {gameEnded && game.opponentAnswer && (
+                      <Card
+                        size="small"
+                        styles={{ body: { padding: '10px 12px' } }}
+                        style={{ background: '#fafafa', borderColor: '#d9d9d9' }}
+                      >
+                        <Text type="secondary">对方答案：</Text>
+                        <Text strong code style={{ marginLeft: 8, fontSize: 16 }}>
+                          {game.opponentAnswer}
+                        </Text>
+                      </Card>
+                    )}
                   </Space>
                 </Col>
                 <Col xs={24} lg={10}>

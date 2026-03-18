@@ -13,16 +13,19 @@ import {
   BadRequestException,
   Logger,
   OnModuleDestroy,
+  OnModuleInit,
   UseFilters,
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { Subscription } from 'rxjs';
 import { Server, Socket } from 'socket.io';
 import { IsIn, IsInt, IsOptional, IsString, Length, Max, Min } from 'class-validator';
 import { ChatService } from '../chat/chat.service';
 import { RateLimitService } from '../common/rate-limit.service';
 import { GameState } from '../database/entities';
+import { LeaderboardChangeEvent, LeaderboardService } from '../leaderboard/leaderboard.service';
 import { LobbyService, UserStatus } from '../lobby/lobby.service';
 import { MatchmakingService } from '../matchmaking/matchmaking.service';
 import { RedisService } from '../redis/redis.service';
@@ -113,7 +116,7 @@ const websocketOrigins =
 })
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 @UseFilters()
-export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
+export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleInit, OnModuleDestroy {
   private static readonly DISCONNECT_CONFIRM_DELAY_MS = 2_000;
   private static readonly INVITE_TIMEOUT_MS = 30_000;
   private readonly logger = new Logger(GameGateway.name);
@@ -121,6 +124,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   private isSweepingTimeouts = false;
   private readonly pendingDisconnects = new Map<number, NodeJS.Timeout>();
   private readonly pendingInvites = new Map<string, PendingInvite>();
+  private leaderboardChangesSubscription: Subscription | null = null;
 
   @WebSocketServer()
   server!: Server;
@@ -131,6 +135,7 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     private readonly lobbyService: LobbyService,
     private readonly matchmakingService: MatchmakingService,
     private readonly gameService: GameService,
+    private readonly leaderboardService: LeaderboardService,
     private readonly chatService: ChatService,
     private readonly redisService: RedisService,
     private readonly rateLimitService: RateLimitService,
@@ -142,11 +147,22 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     }, 5_000);
   }
 
+  onModuleInit() {
+    this.leaderboardChangesSubscription = this.leaderboardService.observeChanges().subscribe({
+      next: (event) => {
+        void this.broadcastLeaderboardUpdate(event);
+      },
+    });
+  }
+
   onModuleDestroy() {
     if (this.timeoutSweepTimer) {
       clearInterval(this.timeoutSweepTimer);
       this.timeoutSweepTimer = null;
     }
+
+    this.leaderboardChangesSubscription?.unsubscribe();
+    this.leaderboardChangesSubscription = null;
 
     for (const timer of this.pendingDisconnects.values()) {
       clearTimeout(timer);
@@ -191,11 +207,11 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         userId: payload.sub,
         status: 'ONLINE',
       });
+      const leaderboardPayload = await this.leaderboardService.getLeaderboardPayload();
       client.emit('lobby_snapshot', {
         onlineUsers: await this.lobbyService.getOnlineUserProfiles(),
-        leaderboard: (await this.usersService.getLeaderboard()).map((item) =>
-          this.usersService.toPublicProfile(item),
-        ),
+        leaderboard: leaderboardPayload.leaderboard,
+        leaderboardUpdatedAt: leaderboardPayload.updatedAt,
         messages: await this.chatService.recentLobbyMessages(),
       });
       const currentGame = await this.gameService.getCurrentGameSnapshot(payload.sub);
@@ -208,6 +224,28 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     } catch {
       client.disconnect();
     }
+  }
+
+  private async broadcastLeaderboardUpdate(event: LeaderboardChangeEvent) {
+    const leaderboardPayload = await this.leaderboardService.getLeaderboardPayload();
+    this.server.emit('leaderboard_updated', {
+      ...leaderboardPayload,
+      reason: event.reason,
+    });
+
+    const profilePayloads = await Promise.all(
+      event.affectedUserIds.map(async (userId) => ({
+        userId,
+        payload: await this.leaderboardService.getProfileUpdatedPayload(userId),
+      })),
+    );
+
+    profilePayloads.forEach(({ userId, payload }) => {
+      if (!payload) {
+        return;
+      }
+      this.server.to(`user:${userId}`).emit('profile_updated', payload);
+    });
   }
 
   async handleDisconnect(client: Socket) {
@@ -440,10 +478,12 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     if (response.winnerId) {
       await this.emitUserPresence(response.game.players.map((player) => player.id));
       response.game.players.forEach((player) => {
+        const opponent = response.game.players.find((candidate) => candidate.id !== player.id);
         this.server.to(`user:${player.id}`).emit('game_win', {
           gameId: body.gameId,
           winnerId: response.winnerId,
           endedAt: response.game.endedAt,
+          opponentAnswer: opponent ? response.game.secrets[opponent.id] : undefined,
         });
       });
     }
@@ -459,10 +499,13 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     const result = await this.gameService.surrender(body.gameId, user.userId);
     await this.emitUserPresence(result.game.players.map((player) => player.id));
     result.game.players.forEach((player) => {
+      const opponent = result.game.players.find((candidate) => candidate.id !== player.id);
       this.server.to(`user:${player.id}`).emit('game_win', {
         gameId: body.gameId,
         winnerId: result.winnerId,
+        endedAt: result.game.endedAt,
         surrenderedBy: user.userId,
+        opponentAnswer: opponent ? result.game.secrets[opponent.id] : undefined,
       });
     });
   }
@@ -542,11 +585,13 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         if (resolution.type === 'forfeit') {
           await this.emitUserPresence(resolution.game.players.map((player) => player.id));
           resolution.game.players.forEach((player) => {
+            const opponent = resolution.game.players.find((candidate) => candidate.id !== player.id);
             this.server.to(`user:${player.id}`).emit('game_win', {
               gameId: resolution.game.id,
               winnerId: resolution.winnerId,
               endedAt: resolution.endedAt,
               forfeitedBy: resolution.loserId,
+              opponentAnswer: opponent ? resolution.game.secrets[opponent.id] : undefined,
             });
           });
           continue;
@@ -554,10 +599,12 @@ export class GameGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
         await this.emitUserPresence(resolution.game.players.map((player) => player.id));
         resolution.game.players.forEach((player) => {
+          const opponent = resolution.game.players.find((candidate) => candidate.id !== player.id);
           this.server.to(`user:${player.id}`).emit('game_invalid', {
             gameId: resolution.game.id,
             endedAt: resolution.endedAt,
             reason: resolution.reason,
+            opponentAnswer: opponent ? resolution.game.secrets[opponent.id] : undefined,
           });
         });
       }

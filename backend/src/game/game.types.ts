@@ -47,6 +47,7 @@ export type GameSnapshot = {
   endedAt?: string;
   winnerId?: number;
   invalidReason?: 'disconnect' | 'inactivity';
+  opponentAnswer?: string;
   myGuesses: { guess: string; hitCharCount: number; hitPosCount: number }[];
   opponentGuesses: { guess: string; hitCharCount: number; hitPosCount: number }[];
   chatMessages: LiveGameChatMessage[];

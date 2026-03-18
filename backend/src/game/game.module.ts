@@ -7,6 +7,7 @@ import {
   GuessEntity,
   SecretEntity,
 } from '../database/entities';
+import { LeaderboardModule } from '../leaderboard/leaderboard.module';
 import { UsersModule } from '../users/users.module';
 import { ChatModule } from '../chat/chat.module';
 import { LobbyModule } from '../lobby/lobby.module';
@@ -19,6 +20,7 @@ import { GameService } from './game.service';
     TypeOrmModule.forFeature([GameEntity, GamePlayerEntity, SecretEntity, GuessEntity]),
     AuthModule,
     UsersModule,
+    LeaderboardModule,
     ChatModule,
     LobbyModule,
     forwardRef(() => MatchmakingModule),

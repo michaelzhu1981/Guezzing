@@ -45,6 +45,7 @@ export type GameView = {
   endedAt?: string;
   winnerId?: number;
   invalidReason?: 'disconnect' | 'inactivity';
+  opponentAnswer?: string;
   myGuesses: { guess: string; hitCharCount: number; hitPosCount: number }[];
   opponentGuesses: { guess: string; hitCharCount: number; hitPosCount: number }[];
   chatMessages: GameMessage[];
@@ -55,18 +56,21 @@ type AppState = {
   user: AuthUser | null;
   onlineUsers: LobbyUser[];
   leaderboard: AuthUser[];
+  leaderboardUpdatedAt: string | null;
   messages: LobbyMessage[];
   game: GameView | null;
   setAuth: (token: string, user: AuthUser) => void;
   logout: () => void;
   setLobbySnapshot: (payload: Partial<AppState>) => void;
+  setLeaderboard: (leaderboard: AuthUser[], updatedAt: string) => void;
+  setUserProfile: (user: AuthUser) => void;
   addMessage: (message: LobbyMessage) => void;
   setGame: (game: GameView | null) => void;
   addGameMessage: (message: GameMessage) => void;
   pushMyGuess: (guess: { guess: string; hitCharCount: number; hitPosCount: number }) => void;
   pushOpponentGuess: (guess: { guess: string; hitCharCount: number; hitPosCount: number }) => void;
-  setWinner: (winnerId: number, endedAt?: string) => void;
-  setInvalid: (reason: 'disconnect' | 'inactivity', endedAt?: string) => void;
+  setWinner: (winnerId: number, endedAt?: string, opponentAnswer?: string) => void;
+  setInvalid: (reason: 'disconnect' | 'inactivity', endedAt?: string, opponentAnswer?: string) => void;
 };
 
 export const useAppStore = create<AppState>((set) => ({
@@ -74,6 +78,7 @@ export const useAppStore = create<AppState>((set) => ({
   user: null,
   onlineUsers: [],
   leaderboard: [],
+  leaderboardUpdatedAt: null,
   messages: [],
   game: null,
   setAuth: (token, user) => set({ token, user }),
@@ -83,12 +88,29 @@ export const useAppStore = create<AppState>((set) => ({
       user: null,
       game: null,
       onlineUsers: [],
+      leaderboard: [],
+      leaderboardUpdatedAt: null,
       messages: [],
     }),
   setLobbySnapshot: (payload) =>
     set((state) => ({
       ...state,
       ...payload,
+    })),
+  setLeaderboard: (leaderboard, updatedAt) =>
+    set((state) => {
+      if (state.leaderboardUpdatedAt && updatedAt <= state.leaderboardUpdatedAt) {
+        return state;
+      }
+
+      return {
+        leaderboard,
+        leaderboardUpdatedAt: updatedAt,
+      };
+    }),
+  setUserProfile: (user) =>
+    set((state) => ({
+      user: state.user && state.user.userId === user.userId ? { ...state.user, ...user } : state.user,
     })),
   addMessage: (message) =>
     set((state) => ({
@@ -128,7 +150,7 @@ export const useAppStore = create<AppState>((set) => ({
           }
         : state,
     ),
-  setWinner: (winnerId, endedAt) =>
+  setWinner: (winnerId, endedAt, opponentAnswer) =>
     set((state) =>
       state.game
         ? {
@@ -136,11 +158,12 @@ export const useAppStore = create<AppState>((set) => ({
               ...state.game,
               winnerId,
               endedAt,
+              opponentAnswer,
             },
           }
         : state,
     ),
-  setInvalid: (reason, endedAt) =>
+  setInvalid: (reason, endedAt, opponentAnswer) =>
     set((state) =>
       state.game
         ? {
@@ -148,6 +171,7 @@ export const useAppStore = create<AppState>((set) => ({
               ...state.game,
               endedAt,
               invalidReason: reason,
+              opponentAnswer,
             },
           }
         : state,
